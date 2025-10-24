@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="hi">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Compare in.json vs india.json on OpenStreetMap (Leaflet)</title>
+
+  <!-- Leaflet CSS -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+    integrity="sha512-somehash" crossorigin=""/>
+
+  <style>
+    html,body{height:100%;margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,"Helvetica Neue",Arial}
+    .wrap{display:flex;gap:8px;height:100vh;padding:8px;box-sizing:border-box}
+    .panel{flex:1;display:flex;flex-direction:column;border:1px solid #ddd;border-radius:8px;overflow:hidden;min-width:260px}
+    .panel header{padding:8px 12px;background:#f7f7f7;border-bottom:1px solid #eee;display:flex;align-items:center;justify-content:space-between;gap:12px}
+    .panel header h2{margin:0;font-size:16px}
+    .map{flex:1}
+    .controls{display:flex;gap:8px;align-items:center}
+    .small{font-size:12px;color:#666}
+    input[type=file]{display:none}
+    .file-label{cursor:pointer;padding:6px 10px;border-radius:6px;border:1px dashed #bbb;background:#fff}
+    .msg{padding:8px 12px;font-size:13px;color:#333}
+    @media (max-width:900px){ .wrap{flex-direction:column} .panel{height:45vh} }
+  </style>
+</head>
+<body>
+
+<div class="wrap">
+  <div class="panel" id="leftPanel">
+    <header>
+      <h2>Map A — <span id="leftName">in.json</span></h2>
+      <div class="controls">
+        <label class="file-label" title="Upload geo/topojson for left map">
+          Upload
+          <input id="leftFile" type="file" accept=".json,application/json">
+        </label>
+        <div class="small" id="leftStatus">Loading <code>in.json</code>...</div>
+      </div>
+    </header>
+    <div id="mapLeft" class="map"></div>
+  </div>
+
+  <div class="panel" id="rightPanel">
+    <header>
+      <h2>Map B — <span id="rightName">india.json</span></h2>
+      <div class="controls">
+        <label class="file-label" title="Upload geo/topojson for right map">
+          Upload
+          <input id="rightFile" type="file" accept=".json,application/json">
+        </label>
+        <div class="small" id="rightStatus">Loading <code>india.json</code>...</div>
+      </div>
+    </header>
+    <div id="mapRight" class="map"></div>
+  </div>
+</div>
+
+<!-- Leaflet JS -->
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+  integrity="sha512-somehash" crossorigin=""></script>
+<!-- topojson-client (for TopoJSON -> GeoJSON) -->
+<script src="https://unpkg.com/topojson-client@3.1.0/dist/topojson-client.min.js"></script>
+
+<script>
+/*
+  Behavior:
+  - Tries to fetch 'in.json' for left and 'india.json' for right from same folder.
+  - If fetch fails (e.g., running from file:// and CORS blocks), user can upload via file input.
+  - Supports GeoJSON or TopoJSON (Topology) input. If TopoJSON, attempts to find the first object.
+  - Styles polygons with contrasting colors and adds popup with properties (if any).
+  - Fits view to the layer bounds.
+*/
+
+const defaultFiles = { left: 'in.json', right: 'india.json' };
+const maps = {};
+const layers = { left: null, right: null };
+
+function createMap(containerId) {
+  const map = L.map(containerId, {preferCanvas: true});
+  const osm = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 19, attribution: '&copy; OpenStreetMap contributors'
+  }).addTo(map);
+  map.once('click', ()=>{}); // tiny noop
+  return map;
+}
+
+maps.left = createMap('mapLeft');
+maps.right = createMap('mapRight');
+
+function styleForSide(side) {
+  if (side === 'left') return {color:'#1f78b4', weight:2, fillOpacity:0.2};
+  return {color:'#33a02c', weight:2, fillOpacity:0.2};
+}
+
+function addGeoJSONToMap(side, geojson, name) {
+  const map = maps[side];
+  // remove previous
+  if (layers[side]) { layers[side].remove(); layers[side]=null; }
+
+  // choose styling
+  const layer = L.geoJSON(geojson, {
+    style: ()=> styleForSide(side),
+    onEachFeature: (feat, lyr) => {
+      let title = '';
+      if (feat.properties) {
+        const keys = Object.keys(feat.properties);
+        if (keys.length) {
+          title = keys.map(k => `<strong>${k}</strong>: ${feat.properties[k]}`).join('<br>');
+        }
+      }
+      if (!title) title = '<em>No properties</em>';
+      lyr.bindPopup(title);
+    }
+  }).addTo(map);
+
+  layers[side] = layer;
+  try {
+    const bounds = layer.getBounds();
+    if (bounds.isValid()) map.fitBounds(bounds.pad(0.2));
+  } catch(e) {
+    // ignore
+  }
+
+  // update header name
+  document.getElementById(side + 'Name').textContent = name || defaultFiles[side];
+  document.getElementById(side + 'Status').textContent = 'Loaded: ' + (name||defaultFiles[side]);
+}
+
+function parseAndAdd(side, jsonObj, filename) {
+  // detect TopoJSON (Topology) vs GeoJSON (FeatureCollection / Geometry)
+  if (jsonObj && jsonObj.type === 'Topology') {
+    // topojson-client: convert all named objects; pick best guess
+    const objKeys = Object.keys(jsonObj.objects || {});
+    if (objKeys.length === 0) {
+      document.getElementById(side + 'Status').textContent = 'TopoJSON has no named objects';
+      return;
+    }
+    // if there is an object with name 'countries' or 'india' prefer it
+    let chosenKey = objKeys[0];
+    const prefer = ['countries','states','india','in','features','collection'];
+    for (const p of prefer) {
+      const match = objKeys.find(k => k.toLowerCase().includes(p));
+      if (match) { chosenKey = match; break; }
+    }
+    const geo = topojson.feature(jsonObj, jsonObj.objects[chosenKey]);
+    addGeoJSONToMap(side, geo, filename + ' (TopoJSON → ' + chosenKey + ')');
+  } else {
+    // assume GeoJSON
+    addGeoJSONToMap(side, jsonObj, filename);
+  }
+}
+
+async function tryFetchThenFallback(side, filename) {
+  const statusEl = document.getElementById(side + 'Status');
+  statusEl.textContent = 'Trying to load ' + filename + ' ...';
+  try {
+    const resp = await fetch(filename, {cache:'no-cache'});
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    const json = await resp.json();
+    parseAndAdd(side, json, filename);
+    return;
+  } catch (err) {
+    // Could be CORS when opened via file:// or file not found
+    console.warn('Fetch failed for', filename, err);
+    statusEl.textContent = `Could not fetch "${filename}" — upload file or place it in same folder.`;
+  }
+}
+
+// wire file inputs
+document.getElementById('leftFile').addEventListener('change', (e)=>{
+  const f = e.target.files[0];
+  if (!f) return;
+  const reader = new FileReader();
+  reader.onload = ()=> {
+    try {
+      const json = JSON.parse(reader.result);
+      parseAndAdd('left', json, f.name);
+    } catch(err) {
+      document.getElementById('leftStatus').textContent = 'Invalid JSON: ' + err.message;
+    }
+  };
+  reader.readAsText(f);
+});
+document.getElementById('rightFile').addEventListener('change', (e)=>{
+  const f = e.target.files[0];
+  if (!f) return;
+  const reader = new FileReader();
+  reader.onload = ()=> {
+    try {
+      const json = JSON.parse(reader.result);
+      parseAndAdd('right', json, f.name);
+    } catch(err) {
+      document.getElementById('rightStatus').textContent = 'Invalid JSON: ' + err.message;
+    }
+  };
+  reader.readAsText(f);
+});
+
+// initial attempts
+tryFetchThenFallback('left', defaultFiles.left);
+tryFetchThenFallback('right', defaultFiles.right);
+
+// small helper: allow clicking on map features to open popup (already bound), highlight on hover
+function enableHoverHighlight(side) {
+  const map = maps[side];
+  map.on('layeradd', function(e){ /* no-op */ });
+  // we will rebind pointer events on each geo layer
+  const originalAdd = L.GeoJSON.prototype.addData;
+  // no need to monkeypatch globally; instead re-style per-layer done above
+}
+enableHoverHighlight('left');
+enableHoverHighlight('right');
+
+</script>
+</body>
+</html>
